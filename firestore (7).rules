@@ -1,0 +1,90 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function userDoc() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function hasUserDoc() {
+      return signedIn()
+        && exists(/databases/$(database)/documents/users/$(request.auth.uid));
+    }
+
+    function isAdmin() {
+      return hasUserDoc() && userDoc().role == 'admin';
+    }
+
+    function isEmployee() {
+      return hasUserDoc() && userDoc().role == 'employee';
+    }
+
+    function isCitizen() {
+      return hasUserDoc() && userDoc().role == 'citizen';
+    }
+
+    function myDepartment() {
+      return userDoc().department;
+    }
+
+    // ---------------- users ----------------
+    match /users/{userId} {
+      allow read: if signedIn()
+        && (request.auth.uid == userId || isAdmin());
+
+      // citizen creates own account
+      allow create: if signedIn()
+        && request.auth.uid == userId
+        && request.resource.data.role == 'citizen'
+        && request.resource.data.active == true;
+
+      // admin creates an employee account
+      allow create: if isAdmin()
+        && request.resource.data.role == 'employee'
+        && request.resource.data.active == true
+        && request.resource.data.department in ['roads', 'sanitation', 'electricity', 'water', 'gardens'];
+
+      allow update, delete: if isAdmin();
+    }
+
+    // ---------------- issues ----------------
+    match /issues/{issueId} {
+      allow read: if signedIn()
+        && (resource.data.ownerUid == request.auth.uid
+            || isAdmin()
+            || (isEmployee() && resource.data.department == myDepartment()));
+
+      allow create: if isCitizen()
+        && request.resource.data.ownerUid == request.auth.uid
+        && request.resource.data.status == 'newIssue'
+        && request.resource.data.type in ['roads', 'sanitation', 'lighting', 'water', 'gardens', 'other']
+        && request.resource.data.description is string
+        && request.resource.data.description.size() <= 500
+        && request.resource.data.location is string
+        && request.resource.data.location.size() <= 300;
+
+      // employee changes status of own department issues only
+      allow update: if isEmployee()
+        && resource.data.department == myDepartment()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'updatedAt', 'resolutionNote'])
+        && request.resource.data.status in ['newIssue', 'inProgress', 'resolved', 'closed'];
+
+      // admin changes status and can move the issue to another department
+      allow update: if isAdmin()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'updatedAt', 'department', 'resolutionNote'])
+        && request.resource.data.status in ['newIssue', 'inProgress', 'resolved', 'closed']
+        && request.resource.data.department in ['roads', 'sanitation', 'electricity', 'water', 'gardens', 'admin'];
+
+      allow delete: if isAdmin();
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
